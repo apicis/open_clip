@@ -6,7 +6,7 @@ from torch.nn import functional as F
 
 try:
     import torch.distributed.nn
-    from torch import distributed as dist
+    from torch import distributed as dist, Tensor
 
     has_distributed = True
 except ImportError:
@@ -122,7 +122,7 @@ class ClipLoss(nn.Module):
         else:
             logits_per_image = logit_scale * image_features @ text_features.T
             logits_per_text = logit_scale * text_features @ image_features.T
-        
+
         return logits_per_image, logits_per_text
 
     def forward(self, image_features, text_features, logit_scale, output_dict=False):
@@ -132,9 +132,9 @@ class ClipLoss(nn.Module):
         labels = self.get_ground_truth(device, logits_per_image.shape[0])
 
         total_loss = (
-            F.cross_entropy(logits_per_image, labels) +
-            F.cross_entropy(logits_per_text, labels)
-        ) / 2
+                             F.cross_entropy(logits_per_image, labels) +
+                             F.cross_entropy(logits_per_text, labels)
+                     ) / 2
 
         return {"contrastive_loss": total_loss} if output_dict else total_loss
 
@@ -208,14 +208,14 @@ class DistillClipLoss(ClipLoss):
         labels = self.get_ground_truth(image_features.device, logits_per_image.shape[0])
 
         contrastive_loss = (
-            F.cross_entropy(logits_per_image, labels) +
-            F.cross_entropy(logits_per_text, labels)
-        ) / 2
+                                   F.cross_entropy(logits_per_image, labels) +
+                                   F.cross_entropy(logits_per_text, labels)
+                           ) / 2
 
         distill_loss = (
-            self.dist_loss(dist_logits_per_image, logits_per_image) +
-            self.dist_loss(dist_logits_per_text, logits_per_text)
-        ) / 2
+                               self.dist_loss(dist_logits_per_image, logits_per_image) +
+                               self.dist_loss(dist_logits_per_text, logits_per_text)
+                       ) / 2
 
         if output_dict:
             return {"contrastive_loss": contrastive_loss, "distill_loss": distill_loss}
@@ -321,6 +321,7 @@ class SigLipLoss(nn.Module):
       year={2023}
     }
     """
+
     def __init__(
             self,
             cache_labels: bool = False,
@@ -446,3 +447,186 @@ class SigLipLoss(nn.Module):
                 assert False
 
         return {"contrastive_loss": loss} if output_dict else loss
+
+
+class NegativeLearningLossRandomSample(nn.Module):
+    def __init__(
+            self,
+            reduction='mean',
+            tokens_num=2000
+    ) -> None:
+        super().__init__()
+        self.tokens_num = tokens_num
+        self.nll_loss = nn.NLLLoss(reduction=reduction)
+
+    def get_probabilities_considered_tokens(self, model_probs: Tensor, considered_tokens: Tensor) -> Tensor:
+        """ Selects the probabilities of the considered tokens
+
+            B: batch
+            V: number of vocabulary tokens
+            S: sentence (tokens)
+            T: number of sampled tokens
+
+        Args:
+            model_probs: probabilities of the model prediction [B x S x V ]
+            considered_tokens: considered tokens sampled [B x S x T ]
+
+        Returns:
+            probs: probabilities of the considered tokens [B x S x T ]
+        """
+        # Get considered tokens shape
+        b, s, tokens_num = considered_tokens.shape
+
+        # Create mask in considered token indices
+        considered_tokens_mask = torch.zeros_like(model_probs, device=model_probs.device, dtype=torch.int).scatter_(-1,
+                                                                                                                    considered_tokens,
+                                                                                                                    1.) > 0
+        # Extract probabilities of the considered tokens
+        probs = model_probs[considered_tokens_mask].view(b, s, tokens_num)
+        return probs
+
+    def randomly_sample_from_set(self, tokens_num: int, tokens_set: Tensor) -> Tensor:
+        """ Randomly sample tokens_num tokens from tokens_set
+
+            V: number of vocabulary tokens
+            S: sentence (tokens)
+            T: number of tokens to sample
+
+        Args:
+            tokens_num: number of tokens to randomly sample
+            tokens_set: set of tokens to sample randomly from [S x V]
+
+        Returns:
+            random_tokens: tokens sampled randomly [S x T]
+        """
+        # Get shape of the token set
+        s, v = tokens_set.shape
+
+        # Randomly sample the tokens from the token_set
+        random_tokens_ind = torch.zeros(size=[s, tokens_num], dtype=torch.int, device=tokens_set.device)
+        for token in range(s):
+            random_tokens_ind[token] = torch.multinomial(torch.ones(v), num_samples=tokens_num, replacement=False)
+
+        # Create random tokens mask
+        random_tokens_mask = torch.zeros_like(tokens_set, device=tokens_set.device).scatter_(-1, random_tokens_ind,
+                                                                                             1.) > 0
+        # Extract tokens from token set
+        random_tokens = tokens_set[random_tokens_mask].view(s, tokens_num)
+        return random_tokens
+
+    def sample_unshared_tokens_descending(self, model_logits: Tensor, target_tokens: Tensor, tokens_num: int,
+                                          token_factor: int) -> Tensor:
+        """ Samples a set of tokens_num from the set of tokens_num*tokens_factor that have highest logit values (hence probability).
+
+            B: batch
+            V: number of vocabulary tokens
+            S: sentence (tokens)
+            T: number of tokens to sample
+
+        Args:
+            model_logits: logits of the model prediction [B x S x V ]
+            target_tokens: tokens in the target tensor [B x S]
+            tokens_num: number of tokens to randomly sample
+            token_factor: multiplying factor of random tokens to enlarge the set to sample from
+
+        Returns:
+            sampled_tokens: tokens randomly sampled among the tokens with highest logit values [B x S x T]
+        """
+        # Get logits shape
+        b, s, v = model_logits.shape
+
+        # Initialize tensors
+        sampled_tokens = torch.zeros([b, s, tokens_num], dtype=torch.int, device=model_logits.device)
+        logits_temp = model_logits.clone()
+
+        for batch in range(b):
+            # Get unique tokens in target
+            unique_target_tokens = torch.unique(target_tokens[batch].flatten())
+
+            # Create the mask of target tokens
+            target_mask = torch.zeros(size=[s, v], dtype=torch.bool, device=model_logits.device)
+            target_mask[:, unique_target_tokens] = True
+
+            # Discard logits of token mask
+            logits_temp[batch, target_mask] = -torch.inf
+
+            # Sort logits decreasing and get first indices (tokens)
+            desc_tokens_subset = torch.sort(logits_temp[batch], dim=-1, descending=True)[1][:,
+                                 0:tokens_num * token_factor]
+
+            # Randomly sample from the set of tokens having highest logit values
+            sampled_tokens[batch] = self.randomly_sample_from_set(tokens_num, tokens_set=desc_tokens_subset)
+        return sampled_tokens
+
+    def forward(self, inputs: Tensor, targets: Tensor) -> Tensor:
+        # Get probabilities
+        model_probs = F.softmax(inputs, dim=-1)
+
+        # Sample token randomly
+        most_probable_tokens = self.sample_unshared_tokens_descending(model_logits=inputs,
+                                                                      target_tokens=targets,
+                                                                      tokens_num=self.tokens_num)
+
+        # Get probabilities for those tokens
+        sampled_probs = self.get_probabilities_considered_tokens(model_probs, most_probable_tokens)
+
+        # Compute loss for random token
+        loss_random = - torch.sum(torch.log(1 - sampled_probs))
+
+        return loss_random
+
+
+class PositiveNegativeCoCaLoss(ClipLoss):
+    def __init__(
+            self,
+            caption_loss_weight,
+            clip_loss_weight,
+            negative_loss_weight,
+            pad_id=0,  # pad_token for open_clip custom tokenizer
+            local_loss=False,
+            gather_with_grad=False,
+            cache_labels=False,
+            rank=0,
+            world_size=1,
+            use_horovod=False,
+    ):
+        super().__init__(
+            local_loss=local_loss,
+            gather_with_grad=gather_with_grad,
+            cache_labels=cache_labels,
+            rank=rank,
+            world_size=world_size,
+            use_horovod=use_horovod
+        )
+
+        self.clip_loss_weight = clip_loss_weight
+        self.caption_loss_weight = caption_loss_weight
+        self.negative_loss_weight = negative_loss_weight
+        self.caption_loss = nn.CrossEntropyLoss(ignore_index=pad_id)
+        self.negative_loss = NegativeLearningLossRandomSample()
+
+    def forward(self, image_features, text_features, logits, labels, logit_scale, targets=None,
+                output_dict=False):
+
+        clip_loss = torch.tensor(0)
+
+        if self.clip_loss_weight:
+            clip_loss = super().forward(image_features, text_features, logit_scale)
+            clip_loss = self.clip_loss_weight * clip_loss
+
+        caption_loss = self.caption_loss(
+            logits.permute(0, 2, 1),
+            labels,
+        )
+        caption_loss = caption_loss * self.caption_loss_weight
+
+        negative_loss = self.negative_loss(
+            logits,
+            targets,
+        )
+        negative_loss = negative_loss * self.negative_loss_weight
+
+        if output_dict:
+            return {"contrastive_loss": clip_loss, "caption_loss": caption_loss, "negative_loss": negative_loss}
+
+        return clip_loss, caption_loss, negative_loss

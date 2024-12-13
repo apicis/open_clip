@@ -424,6 +424,12 @@ def parse_args(args):
         help="Weight assigned to contrastive loss when training CoCa."
     )
     parser.add_argument(
+        "--coca-negative-loss-weight",
+        type=float,
+        default=0.1,
+        help="Weight assigned to negative loss in CoCa."
+    )
+    parser.add_argument(
         "--remote-sync",
         type=str,
         default=None,
