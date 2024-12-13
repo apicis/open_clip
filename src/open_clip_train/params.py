@@ -74,19 +74,19 @@ def parse_args(args):
     parser.add_argument(
         "--csv-separator",
         type=str,
-        default="\t",
+        default=",",
         help="For csv-like datasets, which separator to use."
     )
     parser.add_argument(
         "--csv-img-key",
         type=str,
-        default="filepath",
+        default="filename",
         help="For csv-like datasets, the name of the key for the image paths."
     )
     parser.add_argument(
         "--csv-caption-key",
         type=str,
-        default="title",
+        default="caption",
         help="For csv-like datasets, the name of the key for the captions."
     )
     parser.add_argument(
@@ -129,7 +129,7 @@ def parse_args(args):
         "--workers", type=int, default=4, help="Number of dataloader workers per GPU."
     )
     parser.add_argument(
-        "--batch-size", type=int, default=64, help="Batch size per GPU."
+        "--batch-size", type=int, default=2, help="Batch size per GPU."
     )
     parser.add_argument(
         "--epochs", type=int, default=32, help="Number of epochs to train for."
@@ -206,12 +206,12 @@ def parse_args(args):
     parser.add_argument(
         "--model",
         type=str,
-        default="RN50",
+        default="coca_ViT-L-14",
         help="Name of the vision backbone to use.",
     )
     parser.add_argument(
         "--pretrained",
-        default='',
+        default='mscoco_finetuned_laion2B-s13B-b90k',
         type=str,
         help="Use a pretrained CLIP model weights with the specified tag or file path.",
     )

@@ -1,5 +1,5 @@
 from typing import Optional
-
+import open_clip as open_clip
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -202,24 +202,24 @@ class CoCa(nn.Module):
         return out_dict
 
     def generate(
-            self,
-            image,
-            text=None,
-            seq_len=30,
-            max_seq_len=77,
-            temperature=1.,
-            generation_type="beam_search",
-            top_p=0.1,  # keep tokens in the 1 - top_p quantile
-            top_k=1,  # keeps the top_k most probable tokens
-            pad_token_id=None,
-            eos_token_id=None,
-            sot_token_id=None,
-            num_beams=6,
-            num_beam_groups=3,
-            min_seq_len=5,
-            stopping_criteria=None,
-            repetition_penalty=1.0,
-            fixed_output_length=False  # if True output.shape == (batch_size, seq_len)
+        self,
+        image,
+        text=None,
+        seq_len=30,
+        max_seq_len=77,
+        temperature=1.,
+        generation_type="beam_search",
+        top_p=0.1,  # keep tokens in the 1 - top_p quantile
+        top_k=1,  # keeps the top_k most probable tokens
+        pad_token_id=None,
+        eos_token_id=None,
+        sot_token_id=None,
+        num_beams=6,
+        num_beam_groups=3,
+        min_seq_len=5,
+        stopping_criteria=None,
+        repetition_penalty=1.0,
+        fixed_output_length=False # if True output.shape == (batch_size, seq_len)
     ):
         # taking many ideas and components from HuggingFace GenerationMixin
         # https://huggingface.co/docs/transformers/main/en/main_classes/text_generation
@@ -257,9 +257,9 @@ class CoCa(nn.Module):
                 if fixed_output_length and output.shape[1] < seq_len:
                     pad_len = seq_len - output.shape[1]
                     return torch.cat((
-                        output,
-                        torch.ones(output.shape[0], pad_len, device=device, dtype=output.dtype) * pad_token_id
-                    ),
+                            output,
+                            torch.ones(output.shape[0], pad_len, device=device, dtype=output.dtype) * pad_token_id
+                        ),
                         dim=1
                     )
                 return output
@@ -286,10 +286,12 @@ class CoCa(nn.Module):
                 text = text[None, :]
 
             self.eval()
-            out = text
+            out = {}
+            out["text"] = text
+            out["logits"] = []
 
             while True:
-                x = out[:, -max_seq_len:]
+                x = out["text"][:, -max_seq_len:]
                 cur_len = x.shape[1]
                 logits = self(
                     image,
@@ -298,8 +300,8 @@ class CoCa(nn.Module):
                     image_embs=image_embs,
                     output_labels=False,
                 )["logits"][:, -1]
-                mask = (out[:, -1] == eos_token_id) | (out[:, -1] == pad_token_id)
-                sample = torch.ones((out.shape[0], 1), device=device, dtype=torch.long) * pad_token_id
+                mask = (out["text"][:, -1] == eos_token_id) | (out["text"][:, -1] == pad_token_id)
+                sample = torch.ones((out["text"].shape[0], 1), device=device, dtype=torch.long) * pad_token_id
 
                 if mask.all():
                     if not fixed_output_length:
@@ -307,6 +309,7 @@ class CoCa(nn.Module):
                 else:
                     logits = logits[~mask, :]
                     filtered_logits = logit_processor(x[~mask, :], logits)
+                    out["logits"].append(filtered_logits / temperature)
                     filtered_logits = logit_warper(x[~mask, :], filtered_logits)
                     probs = F.softmax(filtered_logits / temperature, dim=-1)
 
@@ -315,15 +318,15 @@ class CoCa(nn.Module):
                     else:
                         sample[~mask, :] = torch.multinomial(probs, 1)
 
-                out = torch.cat((out, sample), dim=-1)
+                out["text"] = torch.cat((out["text"], sample), dim=-1)
 
                 cur_len += 1
 
-                if all(stopping_criteria(out, None)):
+                if all(stopping_criteria(out["text"], None)):
                     break
 
             if num_dims == 1:
-                out = out.squeeze(0)
+                out["text"] = out["text"].squeeze(0)
 
             self.train(was_training)
             return out
@@ -454,8 +457,7 @@ class CoCa(nn.Module):
                 # (beam_idx // group_size) -> batch_idx
                 # (beam_idx % group_size) -> offset of idx inside the group
                 reordering_indices[batch_group_indices] = (
-                        num_beams * torch.div(beam_idx, group_size, rounding_mode="floor") + group_start_idx + (
-                        beam_idx % group_size)
+                    num_beams * torch.div(beam_idx, group_size, rounding_mode="floor") + group_start_idx + (beam_idx % group_size)
                 )
 
             input_ids = torch.cat([input_ids, current_tokens.unsqueeze(-1)], dim=-1)
@@ -478,6 +480,15 @@ class CoCa(nn.Module):
         )
         return sequence_outputs['sequences']
 
+    def generate_fine_tuning_vanilla(self, images, tokenizer, device):
+        texts = self.generate(images, generation_type="top_k")["text"]
+        texts_final = []
+        for i in range(len(texts)):
+            texts_final.append(open_clip.decode(texts[i]).split("<end_of_text>")[0].replace("<start_of_text>",""))
+        texts = tokenizer(texts_final).to(device)
+        # texts = texts.detach().cpu().numpy()
+        model_out = self.forward(images, texts)
+        return model_out
 
 def prepare_inputs_for_generation(input_ids, image_inputs, past=None, **kwargs):
     if past:

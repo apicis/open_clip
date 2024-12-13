@@ -452,11 +452,13 @@ class SigLipLoss(nn.Module):
 class NegativeLearningLossRandomSample(nn.Module):
     def __init__(
             self,
-            reduction='mean',
-            tokens_num=2000
+            reduction:str,
+            tokens_num:int,
+            token_factor:int
     ) -> None:
         super().__init__()
         self.tokens_num = tokens_num
+        self.token_factor = token_factor
         self.nll_loss = nn.NLLLoss(reduction=reduction)
 
     def get_probabilities_considered_tokens(self, model_probs: Tensor, considered_tokens: Tensor) -> Tensor:
@@ -478,7 +480,7 @@ class NegativeLearningLossRandomSample(nn.Module):
         b, s, tokens_num = considered_tokens.shape
 
         # Create mask in considered token indices
-        considered_tokens_mask = torch.zeros_like(model_probs, device=model_probs.device, dtype=torch.int).scatter_(-1,
+        considered_tokens_mask = torch.zeros_like(model_probs, device=model_probs.device, dtype=torch.int64).scatter_(-1,
                                                                                                                     considered_tokens,
                                                                                                                     1.) > 0
         # Extract probabilities of the considered tokens
@@ -503,13 +505,15 @@ class NegativeLearningLossRandomSample(nn.Module):
         s, v = tokens_set.shape
 
         # Randomly sample the tokens from the token_set
-        random_tokens_ind = torch.zeros(size=[s, tokens_num], dtype=torch.int, device=tokens_set.device)
+        random_tokens_ind = torch.zeros(size=[s, tokens_num], dtype=torch.int64, device=tokens_set.device)
+        src_tensor = torch.ones_like(tokens_set)
         for token in range(s):
             random_tokens_ind[token] = torch.multinomial(torch.ones(v), num_samples=tokens_num, replacement=False)
 
         # Create random tokens mask
-        random_tokens_mask = torch.zeros_like(tokens_set, device=tokens_set.device).scatter_(-1, random_tokens_ind,
-                                                                                             1.) > 0
+        random_tokens_mask = torch.zeros_like(tokens_set, device=tokens_set.device).scatter_(dim=-1, index=random_tokens_ind,
+                                                                                             src=src_tensor) > 0
+
         # Extract tokens from token set
         random_tokens = tokens_set[random_tokens_mask].view(s, tokens_num)
         return random_tokens
@@ -536,7 +540,7 @@ class NegativeLearningLossRandomSample(nn.Module):
         b, s, v = model_logits.shape
 
         # Initialize tensors
-        sampled_tokens = torch.zeros([b, s, tokens_num], dtype=torch.int, device=model_logits.device)
+        sampled_tokens = torch.zeros([b, s, tokens_num], dtype=torch.int64, device=model_logits.device)
         logits_temp = model_logits.clone()
 
         for batch in range(b):
@@ -565,7 +569,8 @@ class NegativeLearningLossRandomSample(nn.Module):
         # Sample token randomly
         most_probable_tokens = self.sample_unshared_tokens_descending(model_logits=inputs,
                                                                       target_tokens=targets,
-                                                                      tokens_num=self.tokens_num)
+                                                                      tokens_num=self.tokens_num,
+                                                                      token_factor=self.token_factor)
 
         # Get probabilities for those tokens
         sampled_probs = self.get_probabilities_considered_tokens(model_probs, most_probable_tokens)
@@ -603,7 +608,7 @@ class PositiveNegativeCoCaLoss(ClipLoss):
         self.caption_loss_weight = caption_loss_weight
         self.negative_loss_weight = negative_loss_weight
         self.caption_loss = nn.CrossEntropyLoss(ignore_index=pad_id)
-        self.negative_loss = NegativeLearningLossRandomSample()
+        self.negative_loss = NegativeLearningLossRandomSample(reduction="mean", tokens_num=8000, token_factor=4)
 
     def forward(self, image_features, text_features, logits, labels, logit_scale, targets=None,
                 output_dict=False):
