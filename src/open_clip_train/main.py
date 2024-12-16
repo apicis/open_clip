@@ -438,6 +438,7 @@ def main(args):
             args.val_sz = data["val"].dataloader.num_samples
         # you will have to configure this for your project!
         wandb.init(
+            entity=args.wandb_entity,
             project=args.wandb_project_name,
             name=args.name,
             id=args.name,

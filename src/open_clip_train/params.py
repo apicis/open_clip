@@ -335,7 +335,7 @@ def parse_args(args):
     )
     parser.add_argument(
         "--report-to",
-        default='',
+        default='wandb',
         type=str,
         help="Options are ['wandb', 'tensorboard', 'wandb,tensorboard']"
     )
@@ -346,9 +346,15 @@ def parse_args(args):
         help="Notes if logging with wandb"
     )
     parser.add_argument(
+        "--wandb-entity",
+        type=str,
+        default='pavis-hsp',
+        help="Name of the entity if logging with wandb.",
+    )
+    parser.add_argument(
         "--wandb-project-name",
         type=str,
-        default='open-clip',
+        default='simca',
         help="Name of the project if logging with wandb.",
     )
     parser.add_argument(

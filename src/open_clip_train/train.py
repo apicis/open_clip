@@ -125,6 +125,9 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
                 total_loss = sum(losses.values())
                 losses["loss"] = total_loss
+                losses["contrastive_loss"] = losses["contrastive_loss"]
+                losses["caption_loss"] = losses["caption_loss"]
+                losses["negative_loss"] = losses["negative_loss"]
 
             backward(total_loss, scaler)
         else:
