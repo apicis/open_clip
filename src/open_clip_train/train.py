@@ -112,7 +112,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 if args.coca_negative_loss_weight == 0:
                     model_out = model(images, texts)
                 else:
-                    model_out = model.generate_fine_tuning_vanilla(images, tokenizer, device)
+                    model_out = model.module.generate_fine_tuning_vanilla(images, tokenizer, device)
                 logit_scale = model_out["logit_scale"]
                 if args.distill:
                     with torch.no_grad():
@@ -127,7 +127,8 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 losses["loss"] = total_loss
                 losses["contrastive_loss"] = losses["contrastive_loss"]
                 losses["caption_loss"] = losses["caption_loss"]
-                losses["negative_loss"] = losses["negative_loss"]
+                if args.coca_negative_loss_weight != 0:
+                    losses["negative_loss"] = losses["negative_loss"]
 
             backward(total_loss, scaler)
         else:
@@ -374,7 +375,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, tokenizer=None):
         log_data['epoch'] = epoch
         wandb.log(log_data, step=step)
 
-    return metrics
+    return gen_loss
 
 
 def get_clip_metrics(image_features, text_features, logit_scale):

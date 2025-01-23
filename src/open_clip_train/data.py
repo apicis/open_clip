@@ -6,20 +6,21 @@ import os
 import random
 import sys
 import braceexpand
-from dataclasses import dataclass
-from multiprocessing import Value
-
+import cv2
 import numpy as np
 import pandas as pd
 import torch
 import torchvision.datasets as datasets
 import webdataset as wds
+import albumentations as A
+
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler, IterableDataset, get_worker_info
 from torch.utils.data.distributed import DistributedSampler
 from webdataset.filters import _shuffle
 from webdataset.tariterators import base_plus_ext, url_opener, tar_file_expander, valid_sample
-
+from dataclasses import dataclass
+from multiprocessing import Value
 try:
     import horovod.torch as hvd
 except ImportError:
@@ -27,12 +28,13 @@ except ImportError:
 
 
 class CsvDatasetHabitat(Dataset):
-    def __init__(self, input_filename, transforms, img_key, caption_key, sep="\t", tokenizer=None):
+    def __init__(self, input_filename, transforms, augmentation, img_key, caption_key, sep="\t", tokenizer=None):
         logging.debug(f'Loading csv data from {input_filename}.')
         df = pd.read_csv(input_filename, sep=sep)
         self.images = df[img_key].tolist()
         self.captions = df[caption_key].tolist()
         self.transforms = transforms
+        self.augmentation = augmentation
         self.bounding_boxes = [ast.literal_eval(bb) for bb in df['bounding_box'].to_list()]
         logging.debug('Done loading data.')
 
@@ -43,16 +45,26 @@ class CsvDatasetHabitat(Dataset):
 
     def __getitem__(self, idx):
         bb = self.bounding_boxes[idx]
-        numpy_image = np.load(str(self.images[idx]))
-        im = Image.fromarray(numpy_image).convert('RGB')
+        img_array_original = np.load(str(self.images[idx]))
+
         # Expand bounding box
-        expanded_bb = [bb[0] - 10 if (bb[0] - 10) >= 0 else 0,
-                       bb[1] - 10 if (bb[1] - 10) >= 0 else bb[1],
-                       bb[2] + 10 if (bb[2] + 10) <= im.size[0] else bb[2],
-                       bb[3] + 10 if (bb[3] + 10) <= im.size[1] else bb[3]]
-        images = self.transforms(im.crop(expanded_bb))
+        bbox_exp_original = [bb[0] - 10 if (bb[0] - 10) >= 0 else 0,
+                       bb[1] - 10 if (bb[1] - 10) >= 0 else 0,
+                       bb[2] + 10 if (bb[2] + 10) < img_array_original.shape[0] else img_array_original.shape[0] - 1,
+                       bb[3] + 10 if (bb[3] + 10) < img_array_original.shape[1] else img_array_original.shape[1] - 1]
+
+        img_array = img_array_original.copy()
+        bbox_exp = bbox_exp_original.copy()
+        if self.augmentation:
+            augmented = self.augmentation(image=img_array_original, bboxes=[bbox_exp_original])
+            if len(augmented['bboxes']) != 0:
+                img_array = augmented['image']
+                bbox_exp = augmented['bboxes'][0]
+
+        im = Image.fromarray(img_array).convert('RGB')
+        images = self.transforms(im.crop(bbox_exp))
         texts = self.tokenize([str(self.captions[idx])])[0]
-        return images, texts
+        return  images, texts # img_array_original, img_array, bbox_exp_original, bbox_exp
 
 
 class CsvDataset(Dataset):
@@ -475,9 +487,17 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
 def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None):
     input_filename = args.train_data if is_train else args.val_data
     assert input_filename
+    augmentation = None
+    if is_train:
+        augmentation = A.Compose([
+            A.HorizontalFlip(p=0.5),
+            A.GaussNoise(std_range=(0.0, 0.05), mean_range=(0.0, 0.0), p=0.5),
+            A.Affine(rotate=(-10.0, 10.0), shear=(-10.0, 10.0), scale=1, p=0.5)
+        ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=[]))
     dataset = CsvDatasetHabitat(
         input_filename,
         preprocess_fn,
+        augmentation=augmentation,
         img_key=args.csv_img_key,
         caption_key=args.csv_caption_key,
         sep=args.csv_separator,
@@ -591,3 +611,38 @@ def get_data(args, preprocess_fns, epoch=0, tokenizer=None):
         data["imagenet-v2"] = get_imagenet(args, preprocess_fns, "v2")
 
     return data
+
+
+if __name__ == "__main__":
+    random.seed(0)
+    np.random.seed(0)
+    torch.manual_seed(0)
+    torch.cuda.manual_seed(0)
+
+    csv_path = "/media/tapicella/Data/data/SImCa_test/fine_tuning/train_coca_ens_clip_gibson.csv"
+    augmentation = A.Compose([
+        A.HorizontalFlip(p=0.5),
+        A.GaussNoise(std_range=(0.0, 0.05), mean_range=(0.0, 0.0), p=0.5),
+        A.Affine(rotate=(-10.0, 10.0), shear=(-10.0, 10.0), scale=1, p=0.5)
+    ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=[]))
+    tokenizer = None
+    transforms = None
+    dataset = CsvDatasetHabitat(input_filename=csv_path, transforms=transforms, tokenizer=tokenizer, augmentation=augmentation, img_key="filename", caption_key="caption", sep=",")
+    dataset_loader = DataLoader(dataset, batch_size=1, shuffle=False)
+
+    # Visualise some samples
+    for i, sample_batch in enumerate(dataset_loader):
+        # Load data
+        img_array_original, img_array, bbox_exp_original, bbox_exp = sample_batch
+
+        img_array_original = img_array_original.detach().numpy()[0]
+        img_array = img_array.cpu().detach().numpy()[0]
+
+        # Visualise
+        cv2.imshow("RGB original", cv2.cvtColor(img_array_original, cv2.COLOR_RGB2BGR))
+        cv2.imshow("RGB", cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR))
+        img_rect_original = cv2.rectangle(cv2.cvtColor(img_array_original, cv2.COLOR_RGB2BGR),(int(bbox_exp_original[0]),int(bbox_exp_original[1])),(int(bbox_exp_original[2]),int(bbox_exp_original[3])),(0,255,0),3)
+        img_rect = cv2.rectangle(cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR),(int(bbox_exp[0]),int(bbox_exp[1])),(int(bbox_exp[2]),int(bbox_exp[3])),(0,255,0),3)
+        cv2.imshow("Bbox original", img_rect_original)
+        cv2.imshow("Bbox", img_rect)
+        cv2.waitKey(0)

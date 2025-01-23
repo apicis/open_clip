@@ -477,6 +477,9 @@ def main(args):
 
     loss = create_loss(args)
 
+    min_eval_loss = 0
+    early_stopping_hook = 0
+    save_logs = args.save_logs
     for epoch in range(start_epoch, args.epochs):
         if is_master(args):
             logging.info(f'Start epoch {epoch}')
@@ -485,10 +488,23 @@ def main(args):
         completed_epoch = epoch + 1
 
         if any(v in data for v in ('val', 'imagenet-val', 'imagenet-v2')):
-            evaluate(model, data, completed_epoch, args, tb_writer=writer, tokenizer=tokenizer)
+            eval_loss = evaluate(model, data, completed_epoch, args, tb_writer=writer, tokenizer=tokenizer)
+
+        if args.early_stopping:
+            if eval_loss >= min_eval_loss:
+                save_logs = False
+                early_stopping_hook += 1
+                min_eval_loss = eval_loss
+                if early_stopping_hook >= args.patience:
+                    print("Early stopping!")
+                    break
+            else:
+                min_eval_loss = 0
+                early_stopping_hook = 0
+                save_logs = args.save_logs
 
         # Saving checkpoints.
-        if args.save_logs:
+        if save_logs:
             checkpoint_dict = {
                 "epoch": completed_epoch,
                 "name": args.name,
@@ -553,4 +569,5 @@ def copy_codebase(args):
 
 
 if __name__ == "__main__":
+    torch.cuda.empty_cache()
     main(sys.argv[1:])

@@ -28,7 +28,7 @@ def parse_args(args):
     parser.add_argument(
         "--train-data",
         type=str,
-        default=None,
+        default="/media/tapicella/Data/data/SImCa_test/fine_tuning/train_coca_ens_clip_gibson.csv",
         help="Path to file(s) with training data. When using webdataset, multiple datasources can be combined using the `::` separator.",
     )
     parser.add_argument(
@@ -44,7 +44,7 @@ def parse_args(args):
     parser.add_argument(
         "--val-data",
         type=str,
-        default=None,
+        default="/media/tapicella/Data/data/SImCa_test/fine_tuning/val_coca_ens_clip_gibson.csv",
         help="Path to file(s) with validation data",
     )
     parser.add_argument(
@@ -129,10 +129,10 @@ def parse_args(args):
         "--workers", type=int, default=4, help="Number of dataloader workers per GPU."
     )
     parser.add_argument(
-        "--batch-size", type=int, default=2, help="Batch size per GPU."
+        "--batch-size", type=int, default=1, help="Batch size per GPU."
     )
     parser.add_argument(
-        "--epochs", type=int, default=32, help="Number of epochs to train for."
+        "--epochs", type=int, default=10, help="Number of epochs to train for."
     )
     parser.add_argument(
         "--epochs-cooldown", type=int, default=None,
@@ -358,6 +358,18 @@ def parse_args(args):
         help="Name of the project if logging with wandb.",
     )
     parser.add_argument(
+        "--early_stopping",
+        type=bool,
+        default=True,
+        help="Whether to use early stopping or not.",
+    )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=3,
+        help="Patience for early stopping.",
+    )
+    parser.add_argument(
         "--debug",
         default=False,
         action="store_true",
@@ -388,7 +400,7 @@ def parse_args(args):
         help="Don't set device index from local rank (when CUDA_VISIBLE_DEVICES restricted to one per proc)."
     )
     parser.add_argument(
-        "--seed", type=int, default=0, help="Default random seed."
+        "--seed", type=int, default=42, help="Default random seed."
     )
     parser.add_argument(
         "--grad-clip-norm", type=float, default=None, help="Gradient clip."
@@ -420,19 +432,19 @@ def parse_args(args):
     parser.add_argument(
         "--coca-caption-loss-weight",
         type=float,
-        default=2.0,
+        default=1.0,
         help="Weight assigned to caption loss in CoCa."
     )
     parser.add_argument(
         "--coca-contrastive-loss-weight",
         type=float,
-        default=1.0,
+        default=0.0,
         help="Weight assigned to contrastive loss when training CoCa."
     )
     parser.add_argument(
         "--coca-negative-loss-weight",
         type=float,
-        default=0.1,
+        default=0.0,
         help="Weight assigned to negative loss in CoCa."
     )
     parser.add_argument(
