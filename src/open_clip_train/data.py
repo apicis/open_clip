@@ -62,8 +62,13 @@ class CsvDatasetHabitat(Dataset):
                 bbox_exp = augmented['bboxes'][0]
 
         im = Image.fromarray(img_array).convert('RGB')
-        images = self.transforms(im.crop(bbox_exp))
-        texts = self.tokenize([str(self.captions[idx])])[0]
+        try:
+            images = self.transforms(im.crop(bbox_exp))
+            texts = self.tokenize([str(self.captions[idx])])[0]
+        except:
+            im = Image.fromarray(img_array_original).convert('RGB')
+            images = self.transforms(im.crop(bbox_exp_original))
+            texts = self.tokenize([str(self.captions[idx])])[0]
         return  images, texts # img_array_original, img_array, bbox_exp_original, bbox_exp
 
 
