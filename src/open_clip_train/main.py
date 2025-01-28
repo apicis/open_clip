@@ -477,7 +477,7 @@ def main(args):
 
     loss = create_loss(args)
 
-    min_eval_loss = 0
+    min_eval_loss = float('inf')
     early_stopping_hook = 0
     save_logs = args.save_logs
     for epoch in range(start_epoch, args.epochs):
@@ -494,12 +494,11 @@ def main(args):
             if eval_loss >= min_eval_loss:
                 save_logs = False
                 early_stopping_hook += 1
-                min_eval_loss = eval_loss
                 if early_stopping_hook >= args.patience:
                     print("Early stopping!")
                     break
             else:
-                min_eval_loss = 0
+                min_eval_loss = eval_loss
                 early_stopping_hook = 0
                 save_logs = args.save_logs
 
