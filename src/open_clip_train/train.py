@@ -109,26 +109,22 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
         if args.accum_freq == 1:
             with autocast():
-                if args.coca_negative_loss_weight == 0:
+                if args.coca_negative_loss_weight == 0 and args.coca_triplet_loss_weight == 0:
                     model_out = model(images, texts)
                 else:
-                    model_out = model.module.generate_fine_tuning_vanilla(images, tokenizer, device)
+                    model_out = model.generate_fine_tuning_vanilla(images, tokenizer, device)
                 logit_scale = model_out["logit_scale"]
                 if args.distill:
                     with torch.no_grad():
                         dist_model_out = dist_model(images, texts)
                     model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
-                if args.coca_negative_loss_weight == 0:
+                if args.coca_negative_loss_weight == 0 and args.coca_triplet_loss_weight == 0:
                     losses = loss(**model_out, output_dict=True)
                 else:
                     losses = loss(**model_out, targets=texts, output_dict=True)
 
                 total_loss = sum(losses.values())
                 losses["loss"] = total_loss
-                losses["contrastive_loss"] = losses["contrastive_loss"]
-                losses["caption_loss"] = losses["caption_loss"]
-                if args.coca_negative_loss_weight != 0:
-                    losses["negative_loss"] = losses["negative_loss"]
 
             backward(total_loss, scaler)
         else:

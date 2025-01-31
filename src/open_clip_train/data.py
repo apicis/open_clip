@@ -17,10 +17,12 @@ import albumentations as A
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler, IterableDataset, get_worker_info
 from torch.utils.data.distributed import DistributedSampler
+from tqdm import tqdm
 from webdataset.filters import _shuffle
 from webdataset.tariterators import base_plus_ext, url_opener, tar_file_expander, valid_sample
 from dataclasses import dataclass
 from multiprocessing import Value
+from torchvision.transforms import v2
 try:
     import horovod.torch as hvd
 except ImportError:
@@ -28,7 +30,8 @@ except ImportError:
 
 
 class CsvDatasetHabitat(Dataset):
-    def __init__(self, input_filename, transforms, augmentation, img_key, caption_key, sep="\t", tokenizer=None):
+    def __init__(self, input_filename, transforms, augmentation, img_key, caption_key, sep="\t", margin=10,
+                 tokenizer=None):
         logging.debug(f'Loading csv data from {input_filename}.')
         df = pd.read_csv(input_filename, sep=sep)
         self.images = df[img_key].tolist()
@@ -37,7 +40,7 @@ class CsvDatasetHabitat(Dataset):
         self.augmentation = augmentation
         self.bounding_boxes = [ast.literal_eval(bb) for bb in df['bounding_box'].to_list()]
         logging.debug('Done loading data.')
-
+        self.margin = margin
         self.tokenize = tokenizer
 
     def __len__(self):
@@ -48,10 +51,12 @@ class CsvDatasetHabitat(Dataset):
         img_array_original = np.load(str(self.images[idx]))
 
         # Expand bounding box
-        bbox_exp_original = [bb[0] - 10 if (bb[0] - 10) >= 0 else 0,
-                       bb[1] - 10 if (bb[1] - 10) >= 0 else 0,
-                       bb[2] + 10 if (bb[2] + 10) < img_array_original.shape[0] else img_array_original.shape[0] - 1,
-                       bb[3] + 10 if (bb[3] + 10) < img_array_original.shape[1] else img_array_original.shape[1] - 1]
+        bbox_exp_original = [bb[0] - self.margin if (bb[0] - self.margin) >= 0 else 0,
+                             bb[1] - self.margin if (bb[1] - self.margin) >= 0 else 0,
+                             bb[2] + self.margin if (bb[2] + self.margin) < img_array_original.shape[0] else
+                             img_array_original.shape[0] - 1,
+                             bb[3] + self.margin if (bb[3] + self.margin) < img_array_original.shape[1] else
+                             img_array_original.shape[1] - 1]
 
         img_array = img_array_original.copy()
         bbox_exp = bbox_exp_original.copy()
@@ -69,7 +74,7 @@ class CsvDatasetHabitat(Dataset):
             im = Image.fromarray(img_array_original).convert('RGB')
             images = self.transforms(im.crop(bbox_exp_original))
             texts = self.tokenize([str(self.captions[idx])])[0]
-        return  images, texts # img_array_original, img_array, bbox_exp_original, bbox_exp
+        return images, texts  # img_array_original, img_array, bbox_exp_original, bbox_exp
 
 
 class CsvDataset(Dataset):
@@ -91,6 +96,210 @@ class CsvDataset(Dataset):
         images = self.transforms(Image.open(str(self.images[idx])))
         texts = self.tokenize([str(self.captions[idx])])[0]
         return images, texts
+
+
+class ImageCaptioningDatasetTriplet(Dataset):
+    """Custom dataset with image, caption pairs"""
+
+    def __init__(self, annotations_file, transforms, augmentation, margin=10, tokenizer=None):
+        annotations_temp = pd.read_csv(annotations_file)
+        self.transforms = transforms
+        self.augmentation = augmentation
+        self.margin = margin
+        self.tokenizer = tokenizer
+
+        # Precompute all the paths to check
+        image_paths = annotations_temp['filename'].apply(lambda x: x.replace(
+            "/projects/simca/extracted_dataset/postprocessed_dataset", "/media/tapicella/Data/data"))
+
+        # Efficiently identify rows with invalid paths
+        valid_paths_mask = image_paths.apply(os.path.exists)
+
+        # Filter out rows with invalid paths
+        self.annotations = annotations_temp[valid_paths_mask].copy()
+        self.episodes_id = annotations_temp['episode_id'][valid_paths_mask].copy()
+        self.object_id = annotations_temp['object_id'][valid_paths_mask].copy()
+
+    def __len__(self):
+        return len(self.annotations)
+
+    def select_examples(self, annotations, bounding_box, episode_id, object_id):
+        """
+        Select a positive and a negative example based on the criteria.
+
+        Args:
+            annotations (DataFrame): The full annotation dataset.
+            episode_id (int): The episode_id of the current anchor image.
+            object_id (int): The object_id of the current anchor image.
+
+        Returns:
+            positive_image, positive_caption, negative_image, negative_caption
+        """
+
+        # Select positive example (same episode_id and same object_id)
+        positive_annotations = annotations[(annotations['bounding_box'] != f"{bounding_box}") &
+                                           (annotations['episode_id'] == episode_id) &
+                                           (annotations['object_id'] == object_id)]
+        positive_example = positive_annotations.sample(1).iloc[0]
+        positive_image = positive_example['filename'].replace("/projects/simca/extracted_dataset/postprocessed_dataset",
+                                                              "/media/tapicella/Data/data")
+        positive_caption = positive_example['caption']
+        positive_bb = ast.literal_eval(positive_example['bounding_box'])
+        positive_episode_id = positive_example['episode_id']
+        positive_object_id = positive_example['object_id']
+
+        # Select negative example (different episode_id and different object_id)
+        negative_annotations = annotations[(annotations['episode_id'] != episode_id) &
+                                           (annotations['object_id'] != object_id)]
+        negative_example = negative_annotations.sample(1).iloc[0]
+        negative_image = negative_example['filename'].replace("/projects/simca/extracted_dataset/postprocessed_dataset",
+                                                              "/media/tapicella/Data/data")
+        negative_caption = negative_example['caption']
+        negative_bb = ast.literal_eval(negative_example['bounding_box'])
+        negative_episode_id = negative_example['episode_id']
+        negative_object_id = negative_example['object_id']
+
+        return positive_image, positive_caption, positive_bb, positive_episode_id, positive_object_id, negative_image, negative_caption, negative_bb, negative_episode_id, negative_object_id
+
+    def __getitem__(self, idx):
+
+        # Get the current anchor image and caption
+        anchor_example = self.annotations.iloc[idx]
+        anchor_image_path = anchor_example['filename'].replace(
+            "/projects/simca/extracted_dataset/postprocessed_dataset", "/media/tapicella/Data/data")
+        anchor_caption = anchor_example['caption']
+        anchor_bb = ast.literal_eval(anchor_example['bounding_box'])
+        anchor_episode_id = anchor_example['episode_id']
+        anchor_object_id = anchor_example['object_id']
+
+        # Select positive and negative examples
+        positive_image_path, positive_caption, positive_bb, positive_episode_id, positive_object_id, negative_image_path, negative_caption, negative_bb, negative_episode_id, negative_object_id = self.select_examples(
+            self.annotations, anchor_bb, anchor_episode_id, anchor_object_id)
+
+        # Load RGB
+        anchor_array_original = np.load(anchor_image_path, allow_pickle=True)['arr_0'].item()['image']
+        positive_array_original = np.load(positive_image_path, allow_pickle=True)['arr_0'].item()['image']
+        negative_array_original = np.load(negative_image_path, allow_pickle=True)['arr_0'].item()['image']
+
+        # Expand bounding box
+        anchor_bb_original = [anchor_bb[0] - self.margin if (anchor_bb[0] - self.margin) >= 0 else 0,
+                              anchor_bb[1] - self.margin if (anchor_bb[1] - self.margin) >= 0 else 0,
+                              anchor_bb[2] + self.margin if (anchor_bb[2] + self.margin) < anchor_array_original.shape[
+                                  0] else (anchor_array_original.shape[0] - 1),
+                              anchor_bb[3] + self.margin if (anchor_bb[3] + self.margin) < anchor_array_original.shape[
+                                  1] else (anchor_array_original.shape[1] - 1)]
+        positive_bb_original = [positive_bb[0] - self.margin if (positive_bb[0] - self.margin) >= 0 else 0,
+                                positive_bb[1] - self.margin if (positive_bb[1] - self.margin) >= 0 else 0,
+                                positive_bb[2] + self.margin if (positive_bb[2] + self.margin) <
+                                                                positive_array_original.shape[0] else (
+                                        positive_array_original.shape[0] - 1),
+                                positive_bb[3] + self.margin if (positive_bb[3] + self.margin) <
+                                                                positive_array_original.shape[1] else (
+                                        positive_array_original.shape[1] - 1)]
+        negative_bb_original = [negative_bb[0] - self.margin if (negative_bb[0] - self.margin) >= 0 else 0,
+                                negative_bb[1] - self.margin if (negative_bb[1] - self.margin) >= 0 else 0,
+                                negative_bb[2] + self.margin if (negative_bb[2] + self.margin) <
+                                                                negative_array_original.shape[0] else (
+                                        negative_array_original.shape[0] - 1),
+                                negative_bb[3] + self.margin if (negative_bb[3] + self.margin) <
+                                                                negative_array_original.shape[1] else (
+                                        negative_array_original.shape[1] - 1)]
+
+        anchor_array = anchor_array_original.copy()
+        positive_array = positive_array_original.copy()
+        negative_array = negative_array_original.copy()
+        anchor_bbox_exp = anchor_bb_original.copy()
+        positive_bbox_exp = positive_bb_original.copy()
+        negative_bbox_exp = negative_bb_original.copy()
+        if self.augmentation:
+            augmented = self.augmentation(image=anchor_array_original, bboxes=[anchor_bb_original])
+            if len(augmented['bboxes']) != 0:
+                anchor_array = augmented['image']
+                anchor_bbox_exp = augmented['bboxes'][0]
+            augmented = self.augmentation(image=positive_array_original, bboxes=[positive_bb_original])
+            if len(augmented['bboxes']) != 0:
+                positive_array = augmented['image']
+                positive_bbox_exp = augmented['bboxes'][0]
+            augmented = self.augmentation(image=negative_array_original, bboxes=[negative_bb_original])
+            if len(augmented['bboxes']) != 0:
+                anchor_array = augmented['image']
+                anchor_bbox_exp = augmented['bboxes'][0]
+            del augmented
+
+        # Load the anchor, positive, and negative images
+        anchor_image = Image.fromarray(anchor_array).convert('RGB')
+        positive_image = Image.fromarray(positive_array).convert('RGB')
+        negative_image = Image.fromarray(negative_array).convert('RGB')
+
+        try:
+            img_final = anchor_image.crop(anchor_bbox_exp)
+            anchor_image = self.transforms(img_final)
+        except:
+            anchor_image = Image.fromarray(anchor_array_original).convert('RGB')
+            img_final = anchor_image.crop(anchor_bb_original)
+            anchor_image = self.transforms(img_final)
+
+
+        try:
+            img_final = positive_image.crop(positive_bbox_exp)
+            positive_image = self.transforms(img_final)
+        except:
+            positive_image = Image.fromarray(positive_array_original).convert('RGB')
+            img_final = positive_image.crop(anchor_bb_original)
+            positive_image = self.transforms(img_final)
+
+
+        try:
+            img_final = negative_image.crop(negative_bbox_exp)
+            negative_image = self.transforms(img_final)
+        except:
+            negative_image = Image.fromarray(negative_array_original).convert('RGB')
+            img_final = negative_image.crop(negative_bb_original)
+            negative_image = self.transforms(img_final)
+
+        if self.tokenizer:
+            anchor_text = self.tokenizer([str(anchor_caption)])[0]
+            positive_text = self.tokenizer([str(positive_caption)])[0]
+            negative_text = self.tokenizer([str(negative_caption)])[0]
+        else:
+            anchor_text = anchor_caption
+            positive_text = positive_caption
+            negative_text = negative_caption
+
+        anchor_encoding = {}
+        anchor_encoding["image"] = anchor_image
+        anchor_encoding["text"] = anchor_text
+        anchor_encoding["caption"] = anchor_caption
+        anchor_encoding["episode_id"] = anchor_episode_id
+        anchor_encoding["object_id"] = anchor_object_id
+        anchor_encoding["img_array_original"] = anchor_array_original
+        anchor_encoding["img_array"] = anchor_array
+        anchor_encoding["bbox_exp_original"] = anchor_bb_original
+        anchor_encoding["bbox_exp"] = anchor_bbox_exp
+
+        positive_encoding = {}
+        positive_encoding["image"] = positive_image
+        positive_encoding["text"] = positive_text
+        positive_encoding["caption"] = positive_caption
+        positive_encoding["episode_id"] = positive_episode_id
+        positive_encoding["object_id"] = positive_object_id
+        positive_encoding["img_array_original"] = positive_array_original
+        positive_encoding["img_array"] = positive_array
+        positive_encoding["bbox_exp_original"] = positive_bb_original
+        positive_encoding["bbox_exp"] = positive_bbox_exp
+
+        negative_encoding = {}
+        negative_encoding["image"] = negative_image
+        negative_encoding["text"] = negative_text
+        negative_encoding["caption"] = negative_caption
+        negative_encoding["episode_id"] = negative_episode_id
+        negative_encoding["object_id"] = negative_object_id
+        negative_encoding["img_array_original"] = negative_array_original
+        negative_encoding["img_array"] = negative_array
+        negative_encoding["bbox_exp_original"] = negative_bb_original
+        negative_encoding["bbox_exp"] = negative_bbox_exp
+
+        return anchor_encoding, positive_encoding, negative_encoding
 
 
 class SharedEpoch:
@@ -488,6 +697,26 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
 
     return DataInfo(dataloader=dataloader, shared_epoch=shared_epoch)
 
+def triplet_collate_function(batch):
+    # pad the input_ids and attention_mask
+    images = []
+    texts = []
+    for b in batch:
+        for key in b[0].keys():
+            anchor_value = b[0][key]
+            positive_value = b[1][key]
+            negative_value = b[2][key]
+            if key == "image":
+                images.append(anchor_value)
+                images.append(positive_value)
+                images.append(negative_value)
+            elif key == "text":
+                texts.append(anchor_value)
+                texts.append(positive_value)
+                texts.append(negative_value)
+    images = torch.stack(images,dim=0)
+    texts = torch.stack(texts, dim=0)
+    return images, texts
 
 def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None):
     input_filename = args.train_data if is_train else args.val_data
@@ -499,19 +728,26 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None):
             A.GaussNoise(std_range=(0.0, 0.05), mean_range=(0.0, 0.0), p=0.5),
             A.Affine(rotate=(-10.0, 10.0), shear=(-10.0, 10.0), scale=1, p=0.5)
         ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=[]))
-    dataset = CsvDatasetHabitat(
-        input_filename,
-        preprocess_fn,
-        augmentation=augmentation,
-        img_key=args.csv_img_key,
-        caption_key=args.csv_caption_key,
-        sep=args.csv_separator,
-        tokenizer=tokenizer
-    )
+    if args.coca_triplet_loss_weight == 0:
+        dataset = CsvDatasetHabitat(
+            input_filename,
+            preprocess_fn,
+            augmentation=augmentation,
+            img_key=args.csv_img_key,
+            caption_key=args.csv_caption_key,
+            sep=args.csv_separator,
+            tokenizer=tokenizer
+        )
+    else:
+        dataset = ImageCaptioningDatasetTriplet(annotations_file=input_filename, transforms=preprocess_fn, augmentation=augmentation, tokenizer=tokenizer)
+
     num_samples = len(dataset)
     sampler = DistributedSampler(dataset) if args.distributed and is_train else None
     shuffle = is_train and sampler is None
 
+    collate_fn = None
+    if args.coca_triplet_loss_weight != 0:
+        collate_fn = triplet_collate_function
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -520,6 +756,7 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None):
         pin_memory=True,
         sampler=sampler,
         drop_last=is_train,
+        collate_fn=collate_fn
     )
     dataloader.num_samples = num_samples
     dataloader.num_batches = len(dataloader)
@@ -624,30 +861,89 @@ if __name__ == "__main__":
     torch.manual_seed(0)
     torch.cuda.manual_seed(0)
 
-    csv_path = "/media/tapicella/Data/data/SImCa_test/fine_tuning/train_coca_ens_clip_gibson.csv"
+    # csv_path = "/media/tapicella/Data/data/SImCa_test/fine_tuning/train_coca_ens_clip_gibson.csv"
+    csv_path = "/media/tapicella/Data/data/gibson_randomGoal_coca_mask2former_train.csv"
     augmentation = A.Compose([
         A.HorizontalFlip(p=0.5),
         A.GaussNoise(std_range=(0.0, 0.05), mean_range=(0.0, 0.0), p=0.5),
         A.Affine(rotate=(-10.0, 10.0), shear=(-10.0, 10.0), scale=1, p=0.5)
     ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=[]))
     tokenizer = None
-    transforms = None
-    dataset = CsvDatasetHabitat(input_filename=csv_path, transforms=transforms, tokenizer=tokenizer, augmentation=augmentation, img_key="filename", caption_key="caption", sep=",")
-    dataset_loader = DataLoader(dataset, batch_size=1, shuffle=False)
+    transforms = v2.Compose([v2.PILToTensor(),v2.ToDtype(torch.float32, scale=True)])
+    use_triplet = True
+    if not use_triplet:
+        dataset = CsvDatasetHabitat(input_filename=csv_path, transforms=transforms, tokenizer=tokenizer,
+                                    augmentation=augmentation, img_key="filename", caption_key="caption", sep=",")
+        dataset_loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
-    # Visualise some samples
-    for i, sample_batch in enumerate(dataset_loader):
-        # Load data
-        img_array_original, img_array, bbox_exp_original, bbox_exp = sample_batch
+        # Visualise some samples
+        for i, sample_batch in enumerate(tqdm(dataset_loader)):
+            # Load data
+            img_array_original, img_array, bbox_exp_original, bbox_exp = sample_batch
 
-        img_array_original = img_array_original.detach().numpy()[0]
-        img_array = img_array.cpu().detach().numpy()[0]
+            img_array_original = img_array_original.detach().numpy()[0]
+            img_array = img_array.cpu().detach().numpy()[0]
 
-        # Visualise
-        cv2.imshow("RGB original", cv2.cvtColor(img_array_original, cv2.COLOR_RGB2BGR))
-        cv2.imshow("RGB", cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR))
-        img_rect_original = cv2.rectangle(cv2.cvtColor(img_array_original, cv2.COLOR_RGB2BGR),(int(bbox_exp_original[0]),int(bbox_exp_original[1])),(int(bbox_exp_original[2]),int(bbox_exp_original[3])),(0,255,0),3)
-        img_rect = cv2.rectangle(cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR),(int(bbox_exp[0]),int(bbox_exp[1])),(int(bbox_exp[2]),int(bbox_exp[3])),(0,255,0),3)
-        cv2.imshow("Bbox original", img_rect_original)
-        cv2.imshow("Bbox", img_rect)
-        cv2.waitKey(0)
+            # Visualise
+            cv2.imshow("RGB original", cv2.cvtColor(img_array_original, cv2.COLOR_RGB2BGR))
+            cv2.imshow("RGB", cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR))
+            img_rect_original = cv2.rectangle(cv2.cvtColor(img_array_original, cv2.COLOR_RGB2BGR),
+                                              (int(bbox_exp_original[0]), int(bbox_exp_original[1])),
+                                              (int(bbox_exp_original[2]), int(bbox_exp_original[3])), (0, 255, 0), 3)
+            img_rect = cv2.rectangle(cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR), (int(bbox_exp[0]), int(bbox_exp[1])),
+                                     (int(bbox_exp[2]), int(bbox_exp[3])), (0, 255, 0), 3)
+            cv2.imshow("Bbox original", img_rect_original)
+            cv2.imshow("Bbox", img_rect)
+            cv2.waitKey(0)
+    else:
+        dataset = ImageCaptioningDatasetTriplet(annotations_file=csv_path, transforms=transforms,
+                                                augmentation=augmentation)
+        dataset_loader = DataLoader(dataset, batch_size=1, shuffle=True)
+
+        # Visualise some samples
+        for i, sample_batch in enumerate(tqdm(dataset_loader)):
+            # Load data
+            anchor_encoding, positive_encoding, negative_encoding = sample_batch
+
+            anchor_array_original = anchor_encoding["img_array_original"]
+            anchor_bbox_original = anchor_encoding["bbox_exp_original"]
+            anchor_episode_id = anchor_encoding["episode_id"].item()
+            anchor_object_id = anchor_encoding["object_id"].item()
+
+            positive_array_original = positive_encoding["img_array_original"]
+            positive_bbox_original = positive_encoding["bbox_exp_original"]
+            positive_episode_id = positive_encoding["episode_id"].item()
+            positive_object_id = positive_encoding["object_id"].item()
+
+            negative_array_original = negative_encoding["img_array_original"]
+            negative_bbox_original = negative_encoding["bbox_exp_original"]
+            negative_episode_id = negative_encoding["episode_id"].item()
+            negative_object_id = negative_encoding["object_id"].item()
+
+            anchor_array_original = anchor_array_original.detach().numpy()[0]
+            positive_array_original = positive_array_original.detach().numpy()[0]
+            negative_array_original = negative_array_original.detach().numpy()[0]
+
+            # Visualise
+            img_vis = cv2.rectangle(cv2.cvtColor(anchor_array_original, cv2.COLOR_RGB2BGR),
+                                    (int(anchor_bbox_original[0]), int(anchor_bbox_original[1])),
+                                    (int(anchor_bbox_original[2]), int(anchor_bbox_original[3])), (0, 255, 0), 3)
+            cv2.imshow("Anchor", cv2.resize(img_vis, (img_vis.shape[1] // 4, img_vis.shape[0] // 4)))
+
+            img_vis = cv2.rectangle(cv2.cvtColor(positive_array_original, cv2.COLOR_RGB2BGR),
+                                    (int(positive_bbox_original[0]), int(positive_bbox_original[1])),
+                                    (int(positive_bbox_original[2]), int(positive_bbox_original[3])), (0, 255, 0), 3)
+            cv2.imshow("Positive", cv2.resize(img_vis, (img_vis.shape[1] // 4, img_vis.shape[0] // 4)))
+
+            img_vis = cv2.rectangle(cv2.cvtColor(negative_array_original, cv2.COLOR_RGB2BGR),
+                                    (int(negative_bbox_original[0]), int(negative_bbox_original[1])),
+                                    (int(negative_bbox_original[2]), int(negative_bbox_original[3])), (0, 255, 0), 3)
+            cv2.imshow("Negative",
+                       cv2.resize(img_vis, (img_vis.shape[1] // 4, img_vis.shape[0] // 4)))
+            print(f"{anchor_episode_id=}")
+            print(f"{anchor_object_id=}")
+            print(f"{positive_episode_id=}")
+            print(f"{positive_object_id=}")
+            print(f"{negative_episode_id=}")
+            print(f"{negative_object_id=}")
+            cv2.waitKey(0)

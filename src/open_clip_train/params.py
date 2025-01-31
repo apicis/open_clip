@@ -28,7 +28,7 @@ def parse_args(args):
     parser.add_argument(
         "--train-data",
         type=str,
-        default="/media/tapicella/Data/data/SImCa_test/fine_tuning/train_coca_ens_clip_gibson.csv",
+        default="/media/tapicella/Data/data/gibson_randomGoal_coca_mask2former_train.csv",
         help="Path to file(s) with training data. When using webdataset, multiple datasources can be combined using the `::` separator.",
     )
     parser.add_argument(
@@ -44,7 +44,7 @@ def parse_args(args):
     parser.add_argument(
         "--val-data",
         type=str,
-        default="/media/tapicella/Data/data/SImCa_test/fine_tuning/val_coca_ens_clip_gibson.csv",
+        default="/media/tapicella/Data/data/gibson_randomGoal_coca_mask2former_train.csv",
         help="Path to file(s) with validation data",
     )
     parser.add_argument(
@@ -138,11 +138,11 @@ def parse_args(args):
         "--epochs-cooldown", type=int, default=None,
         help="When scheduler w/ cooldown used, perform cooldown from total_epochs - cooldown_epochs onwards."
     )
-    parser.add_argument("--lr", type=float, default=None, help="Learning rate.")
+    parser.add_argument("--lr", type=float, default=0.0005, help="Learning rate.")
     parser.add_argument("--beta1", type=float, default=None, help="Adam beta 1.")
     parser.add_argument("--beta2", type=float, default=None, help="Adam beta 2.")
     parser.add_argument("--eps", type=float, default=None, help="Adam epsilon.")
-    parser.add_argument("--wd", type=float, default=0.2, help="Weight decay.")
+    parser.add_argument("--wd", type=float, default=0.001, help="Weight decay.")
     parser.add_argument("--momentum", type=float, default=None, help="Momentum (for timm optimizers).")
     parser.add_argument(
         "--warmup", type=int, default=10000, help="Number of steps to warmup for."
@@ -440,6 +440,12 @@ def parse_args(args):
         type=float,
         default=0.0,
         help="Weight assigned to contrastive loss when training CoCa."
+    )
+    parser.add_argument(
+        "--coca-triplet-loss-weight",
+        type=float,
+        default=1.0,
+        help="Weight assigned to triplet loss in CoCa."
     )
     parser.add_argument(
         "--coca-negative-loss-weight",

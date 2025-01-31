@@ -635,3 +635,91 @@ class PositiveNegativeCoCaLoss(ClipLoss):
             return {"contrastive_loss": clip_loss, "caption_loss": caption_loss, "negative_loss": negative_loss}
 
         return clip_loss, caption_loss, negative_loss
+
+
+class TripletLoss(nn.Module):
+    def __init__(
+            self,
+            reduction: str
+    ) -> None:
+        super().__init__()
+        self.triplet_loss = nn.TripletMarginLoss(reduction=reduction)
+
+    def forward(self, anchors: Tensor, positives: Tensor, negatives:Tensor) -> Tensor:
+        # Compute loss
+        print(f"{anchors.shape=}")
+        print(f"{positives.shape=}")
+        print(f"{negatives.shape=}")
+        loss = self.triplet_loss(anchor=anchors, positive=positives, negative=negatives)
+        return loss
+
+
+class TripletCoCaLoss(ClipLoss):
+    def __init__(
+            self,
+            caption_loss_weight,
+            clip_loss_weight,
+            triplet_loss_weight,
+            pad_id=0,  # pad_token for open_clip custom tokenizer
+            local_loss=False,
+            gather_with_grad=False,
+            cache_labels=False,
+            rank=0,
+            world_size=1,
+            use_horovod=False,
+    ):
+        super().__init__(
+            local_loss=local_loss,
+            gather_with_grad=gather_with_grad,
+            cache_labels=cache_labels,
+            rank=rank,
+            world_size=world_size,
+            use_horovod=use_horovod
+        )
+        self.clip_loss_weight = clip_loss_weight
+        self.caption_loss_weight = caption_loss_weight
+        self.triplet_loss_weight = triplet_loss_weight
+        self.caption_loss = nn.CrossEntropyLoss(reduction="mean")
+        self.triplet_loss = TripletLoss(reduction="mean")
+
+    def forward(self, image_features, text_features, logits, labels, logit_scale, targets=None,
+                output_dict=False):
+
+        clip_loss = torch.tensor(0)
+
+        if self.clip_loss_weight:
+            clip_loss = super().forward(image_features, text_features, logit_scale)
+            clip_loss = self.clip_loss_weight * clip_loss
+
+        # Get only anchor negative examples to compute captioning loss
+        mask = torch.ones(logits.shape[0], dtype=torch.bool, device=logits.device)
+        mask[1::3] = False
+        anchor_negatives_logits = logits[mask, :, :]
+        anchor_negatives_labels = labels[mask, :]
+        caption_loss = self.caption_loss(
+            anchor_negatives_logits.permute(0, 2, 1),
+            anchor_negatives_labels,
+        )
+        caption_loss = caption_loss * self.caption_loss_weight
+
+        # Separate into anchors, positives and negatives
+        mask = torch.zeros(logits.shape[0], dtype=torch.bool, device=logits.device)
+        mask[::3] = True
+        anchors = logits[mask, :, :]
+        mask = torch.zeros(logits.shape[0], dtype=torch.bool, device=logits.device)
+        mask[1::3] = True
+        positives = logits[mask, :, :]
+        mask = torch.zeros(logits.shape[0], dtype=torch.bool, device=logits.device)
+        mask[2::3] = True
+        negatives = logits[mask, :, :]
+        triplet_loss = self.triplet_loss(
+            anchors=anchors,
+            positives=positives,
+            negatives=negatives
+        )
+        triplet_loss = triplet_loss * self.triplet_loss_weight
+
+        if output_dict:
+            return {"contrastive_loss": clip_loss, "caption_loss": caption_loss, "triplet_loss": triplet_loss}
+
+        return clip_loss, caption_loss, triplet_loss
