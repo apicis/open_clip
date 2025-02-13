@@ -681,34 +681,36 @@ class TripletCoCaLoss(ClipLoss):
 
     def forward(self, image_features, text_features, logits, labels, logit_scale, targets=None,
                 output_dict=False):
+        # Get only anchor examples to compute captioning loss
+        mask = torch.zeros(logits.shape[0], dtype=torch.bool, device=logits.device)
+        mask[::3] = True
+        anchor_logits = logits[mask, :, :]
+        anchor_labels = labels[mask, :]
+        anchor_image_features = image_features[mask]
+        anchor_text_features = text_features[mask]
 
         clip_loss = torch.tensor(0)
 
         if self.clip_loss_weight:
-            clip_loss = super().forward(image_features, text_features, logit_scale)
+            clip_loss = super().forward(anchor_image_features, anchor_text_features, logit_scale)
             clip_loss = self.clip_loss_weight * clip_loss
 
-        # Get only anchor negative examples to compute captioning loss
-        mask = torch.ones(logits.shape[0], dtype=torch.bool, device=logits.device)
-        mask[1::3] = False
-        anchor_negatives_logits = logits[mask, :, :]
-        anchor_negatives_labels = labels[mask, :]
         caption_loss = self.caption_loss(
-            anchor_negatives_logits.permute(0, 2, 1),
-            anchor_negatives_labels,
+            anchor_logits.permute(0, 2, 1),
+            anchor_labels,
         )
         caption_loss = caption_loss * self.caption_loss_weight
 
         # Separate into anchors, positives and negatives
-        mask = torch.zeros(logits.shape[0], dtype=torch.bool, device=logits.device)
+        mask = torch.zeros(anchor_image_features.shape[0], dtype=torch.bool, device=logits.device)
         mask[::3] = True
-        anchors = logits[mask, :, :]
-        mask = torch.zeros(logits.shape[0], dtype=torch.bool, device=logits.device)
+        anchors = anchor_image_features[mask]
+        mask = torch.zeros(anchor_image_features.shape[0], dtype=torch.bool, device=logits.device)
         mask[1::3] = True
-        positives = logits[mask, :, :]
-        mask = torch.zeros(logits.shape[0], dtype=torch.bool, device=logits.device)
+        positives = anchor_image_features[mask]
+        mask = torch.zeros(anchor_image_features.shape[0], dtype=torch.bool, device=logits.device)
         mask[2::3] = True
-        negatives = logits[mask, :, :]
+        negatives = anchor_image_features[mask]
         triplet_loss = self.triplet_loss(
             anchors=anchors,
             positives=positives,
@@ -756,8 +758,8 @@ class PositiveNegativeTripletLoss(ClipLoss):
                 output_dict=False):
 
         # Get only anchor examples to compute captioning loss
-        mask = torch.ones(logits.shape[0], dtype=torch.bool, device=logits.device)
-        mask[1::3] = False
+        mask = torch.zeros(logits.shape[0], dtype=torch.bool, device=logits.device)
+        mask[::3] = True
         anchor_logits = logits[mask, :, :]
         anchor_labels = labels[mask, :]
         anchor_image_features = image_features[mask]
@@ -782,15 +784,15 @@ class PositiveNegativeTripletLoss(ClipLoss):
         negative_loss = negative_loss * self.negative_loss_weight
 
         # Separate into anchors, positives and negatives
-        mask = torch.zeros(logits.shape[0], dtype=torch.bool, device=logits.device)
+        mask = torch.zeros(anchor_image_features.shape[0], dtype=torch.bool, device=logits.device)
         mask[::3] = True
-        anchors = logits[mask, :, :]
-        mask = torch.zeros(logits.shape[0], dtype=torch.bool, device=logits.device)
+        anchors = anchor_image_features[mask]
+        mask = torch.zeros(anchor_image_features.shape[0], dtype=torch.bool, device=logits.device)
         mask[1::3] = True
-        positives = logits[mask, :, :]
-        mask = torch.zeros(logits.shape[0], dtype=torch.bool, device=logits.device)
+        positives = anchor_image_features[mask]
+        mask = torch.zeros(anchor_image_features.shape[0], dtype=torch.bool, device=logits.device)
         mask[2::3] = True
-        negatives = logits[mask, :, :]
+        negatives = anchor_image_features[mask]
         triplet_loss = self.triplet_loss(
             anchors=anchors,
             positives=positives,
