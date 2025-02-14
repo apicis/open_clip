@@ -109,8 +109,7 @@ class ImageCaptioningDatasetTriplet(Dataset):
         self.tokenizer = tokenizer
 
         # Precompute all the paths to check
-        image_paths = annotations_temp['filename'].apply(lambda x: x.replace(
-            "/projects/simca/extracted_dataset/postprocessed_dataset", "/media/tapicella/Data/data"))
+        image_paths = annotations_temp['filename']#.apply(lambda x: x.replace("/projects/simca/extracted_dataset/postprocessed_dataset", "/media/tapicella/Data/data"))
 
         # Efficiently identify rows with invalid paths
         valid_paths_mask = image_paths.apply(os.path.exists)
@@ -141,8 +140,7 @@ class ImageCaptioningDatasetTriplet(Dataset):
                                            (annotations['episode_id'] == episode_id) &
                                            (annotations['object_id'] == object_id)]
         positive_example = positive_annotations.sample(1).iloc[0]
-        positive_image = positive_example['filename'].replace("/projects/simca/extracted_dataset/postprocessed_dataset",
-                                                              "/media/tapicella/Data/data")
+        positive_image = positive_example['filename']#.replace("/projects/simca/extracted_dataset/postprocessed_dataset","/media/tapicella/Data/data")
         positive_caption = positive_example['caption']
         positive_bb = ast.literal_eval(positive_example['bounding_box'])
         positive_episode_id = positive_example['episode_id']
@@ -152,8 +150,7 @@ class ImageCaptioningDatasetTriplet(Dataset):
         negative_annotations = annotations[(annotations['episode_id'] != episode_id) &
                                            (annotations['object_id'] != object_id)]
         negative_example = negative_annotations.sample(1).iloc[0]
-        negative_image = negative_example['filename'].replace("/projects/simca/extracted_dataset/postprocessed_dataset",
-                                                              "/media/tapicella/Data/data")
+        negative_image = negative_example['filename']#.replace("/projects/simca/extracted_dataset/postprocessed_dataset","/media/tapicella/Data/data")
         negative_caption = negative_example['caption']
         negative_bb = ast.literal_eval(negative_example['bounding_box'])
         negative_episode_id = negative_example['episode_id']
@@ -165,8 +162,7 @@ class ImageCaptioningDatasetTriplet(Dataset):
 
         # Get the current anchor image and caption
         anchor_example = self.annotations.iloc[idx]
-        anchor_image_path = anchor_example['filename'].replace(
-            "/projects/simca/extracted_dataset/postprocessed_dataset", "/media/tapicella/Data/data")
+        anchor_image_path = anchor_example['filename']#.replace("/projects/simca/extracted_dataset/postprocessed_dataset", "/media/tapicella/Data/data")
         anchor_caption = anchor_example['caption']
         anchor_bb = ast.literal_eval(anchor_example['bounding_box'])
         anchor_episode_id = anchor_example['episode_id']
