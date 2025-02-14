@@ -679,8 +679,7 @@ class TripletCoCaLoss(ClipLoss):
         self.caption_loss = nn.CrossEntropyLoss(reduction="mean")
         self.triplet_loss = TripletLoss(reduction="mean")
 
-    def forward(self, image_features, text_features, logits, labels, logit_scale, targets=None,
-                output_dict=False):
+    def forward(self, image_features, text_features, logits, labels, logit_scale, output_dict=False):
         # Get only anchor examples to compute captioning loss
         mask = torch.zeros(logits.shape[0], dtype=torch.bool, device=logits.device)
         mask[::3] = True
@@ -764,6 +763,7 @@ class PositiveNegativeTripletLoss(ClipLoss):
         anchor_labels = labels[mask, :]
         anchor_image_features = image_features[mask]
         anchor_text_features = text_features[mask]
+        anchor_targets = targets[mask]
 
         clip_loss = torch.tensor(0)
 
@@ -779,7 +779,7 @@ class PositiveNegativeTripletLoss(ClipLoss):
 
         negative_loss = self.negative_loss(
             anchor_logits,
-            anchor_labels,
+            anchor_targets,
         )
         negative_loss = negative_loss * self.negative_loss_weight
 
