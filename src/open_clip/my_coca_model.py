@@ -1,5 +1,5 @@
 from typing import Optional
-import open_clip as open_clip
+# import open_clip as open_clip
 import torch
 from torch import nn
 from torch.nn import functional as F

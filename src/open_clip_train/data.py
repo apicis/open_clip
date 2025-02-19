@@ -139,6 +139,11 @@ class ImageCaptioningDatasetTriplet(Dataset):
         positive_annotations = annotations[(annotations['bounding_box'] != f"{bounding_box}") &
                                            (annotations['episode_id'] == episode_id) &
                                            (annotations['object_id'] == object_id)]
+        # Check if positive is empty
+        if positive_annotations.shape[0] == 0:
+            positive_annotations = annotations[(annotations['bounding_box'] == f"{bounding_box}") &
+                                           (annotations['episode_id'] == episode_id) &
+                                           (annotations['object_id'] == object_id)]
         positive_example = positive_annotations.sample(1).iloc[0]
         positive_image = positive_example['filename']#.replace("/projects/simca/extracted_dataset/postprocessed_dataset","/media/tapicella/Data/data")
         positive_caption = positive_example['caption']
@@ -218,8 +223,8 @@ class ImageCaptioningDatasetTriplet(Dataset):
                 positive_bbox_exp = augmented['bboxes'][0]
             augmented = self.augmentation(image=negative_array_original, bboxes=[negative_bb_original])
             if len(augmented['bboxes']) != 0:
-                anchor_array = augmented['image']
-                anchor_bbox_exp = augmented['bboxes'][0]
+                negative_array = augmented['image']
+                negative_bbox_exp = augmented['bboxes'][0]
             del augmented
 
         # Load the anchor, positive, and negative images
@@ -235,7 +240,6 @@ class ImageCaptioningDatasetTriplet(Dataset):
             img_final = anchor_image.crop(anchor_bb_original)
             anchor_image = self.transforms(img_final)
 
-
         try:
             img_final = positive_image.crop(positive_bbox_exp)
             positive_image = self.transforms(img_final)
@@ -243,7 +247,6 @@ class ImageCaptioningDatasetTriplet(Dataset):
             positive_image = Image.fromarray(positive_array_original).convert('RGB')
             img_final = positive_image.crop(anchor_bb_original)
             positive_image = self.transforms(img_final)
-
 
         try:
             img_final = negative_image.crop(negative_bbox_exp)
@@ -901,18 +904,18 @@ if __name__ == "__main__":
             # Load data
             anchor_encoding, positive_encoding, negative_encoding = sample_batch
 
-            anchor_array_original = anchor_encoding["img_array_original"]
-            anchor_bbox_original = anchor_encoding["bbox_exp_original"]
+            anchor_array_original = anchor_encoding["img_array"]
+            anchor_bbox_original = anchor_encoding["bbox_exp"]
             anchor_episode_id = anchor_encoding["episode_id"].item()
             anchor_object_id = anchor_encoding["object_id"].item()
 
-            positive_array_original = positive_encoding["img_array_original"]
-            positive_bbox_original = positive_encoding["bbox_exp_original"]
+            positive_array_original = positive_encoding["img_array"]
+            positive_bbox_original = positive_encoding["bbox_exp"]
             positive_episode_id = positive_encoding["episode_id"].item()
             positive_object_id = positive_encoding["object_id"].item()
 
-            negative_array_original = negative_encoding["img_array_original"]
-            negative_bbox_original = negative_encoding["bbox_exp_original"]
+            negative_array_original = negative_encoding["img_array"]
+            negative_bbox_original = negative_encoding["bbox_exp"]
             negative_episode_id = negative_encoding["episode_id"].item()
             negative_object_id = negative_encoding["object_id"].item()
 
