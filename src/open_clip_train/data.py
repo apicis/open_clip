@@ -48,7 +48,8 @@ class CsvDatasetHabitat(Dataset):
 
     def __getitem__(self, idx):
         bb = self.bounding_boxes[idx]
-        img_array_original = np.load(str(self.images[idx]))
+        # img_array_original = np.load(str(self.images[idx]))
+        img_array_original = np.load(self.images[idx], allow_pickle=True)['arr_0'].item()['image']
 
         # Expand bounding box
         bbox_exp_original = [bb[0] - self.margin if (bb[0] - self.margin) >= 0 else 0,
