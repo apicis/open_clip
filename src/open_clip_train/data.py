@@ -728,7 +728,10 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None):
             A.GaussNoise(std_range=(0.0, 0.05), mean_range=(0.0, 0.0), p=0.5),
             A.Affine(rotate=(-10.0, 10.0), shear=(-10.0, 10.0), scale=1, p=0.5)
         ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=[]))
-    if args.coca_triplet_loss_weight == 0:
+    if args.coca_triplet_loss_weight != 0 and is_train:
+        dataset = ImageCaptioningDatasetTriplet(annotations_file=input_filename, transforms=preprocess_fn,
+                                                augmentation=augmentation, tokenizer=tokenizer)
+    else:
         dataset = CsvDatasetHabitat(
             input_filename,
             preprocess_fn,
@@ -738,26 +741,35 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None):
             sep=args.csv_separator,
             tokenizer=tokenizer
         )
-    else:
-        dataset = ImageCaptioningDatasetTriplet(annotations_file=input_filename, transforms=preprocess_fn, augmentation=augmentation, tokenizer=tokenizer)
 
     num_samples = len(dataset)
     sampler = DistributedSampler(dataset) if args.distributed and is_train else None
     shuffle = is_train and sampler is None
 
     collate_fn = None
-    if args.coca_triplet_loss_weight != 0:
+    if args.coca_triplet_loss_weight != 0 and is_train:
         collate_fn = triplet_collate_function
-    dataloader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=shuffle,
-        num_workers=args.workers,
-        pin_memory=True,
-        sampler=sampler,
-        drop_last=is_train,
-        collate_fn=collate_fn
-    )
+        dataloader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=shuffle,
+            num_workers=args.workers,
+            pin_memory=True,
+            sampler=sampler,
+            drop_last=is_train,
+            collate_fn=collate_fn
+        )
+    else:
+        dataloader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=shuffle,
+            num_workers=args.workers,
+            pin_memory=True,
+            sampler=sampler,
+            drop_last=is_train,
+        )
+
     dataloader.num_samples = num_samples
     dataloader.num_batches = len(dataloader)
 
